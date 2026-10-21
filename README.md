@@ -2,9 +2,9 @@
 
 This repository demonstrates a secure CI/CD pipeline for a FastAPI-based ML service using VADER sentiment analysis for lightweight inference.
 
-Built by [thriniiiiiiiiiiii](https://github.com/thriniiiiiiiiiiii) as a hands-on DevSecMLOps project showcasing modern cloud-native security practices end-to-end.
+Built  as a hands-on DevSecMLOps project showcasing modern cloud-native security practices end-to-end.
 
-Docker Hub: [thriniiiiiiiiiiii/secure-ml-sentiment-api](https://hub.docker.com/r/thriniiiiiiiiiiii/secure-ml-sentiment-api)
+
 
 ---
 
@@ -100,10 +100,7 @@ flowchart LR
 
 Build and run locally:
 
-```bash
-docker build -t thriniiiiiiiiiiii/secure-ml-sentiment-api:latest .
-docker run -p 8000:8000 thriniiiiiiiiiiii/secure-ml-sentiment-api:latest
-```
+
 
 Get a token first (demo user):
 
@@ -190,8 +187,7 @@ What gets provisioned:
 
 ## Threat Model
 
-A detailed threat model for this project (STRIDE methodology + OWASP Top 10 alignment) is documented in [ThreatModel.md](https://github.com/thriniiiiiiiiiiii/Secure-CI-CD-Pipeline-for-an-ML-Sentiment-Analysis-API-DevSecMLOps-/blob/main/ThreatModel.md).
-
+A detailed threat model for this project (STRIDE methodology + OWASP Top 10 alignment) is documented in [ThreatModel.md]\
 ---
 
 ## Future Improvements
