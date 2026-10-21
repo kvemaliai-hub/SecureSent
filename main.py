@@ -1,0 +1,174 @@
+"""
+Secure ML Sentiment Analysis API
+---------------------------------
+Author  : thriniiiiiiiiiiii (https://github.com/thriniiiiiiiiiiii)
+Project : Secure CI/CD Pipeline for an ML Sentiment Analysis API (DevSecMLOps)
+Image   : thriniiiiiiiiiiii/secure-ml-sentiment-api:latest
+
+A production-grade FastAPI service that performs VADER sentiment analysis
+with JWT authentication, rate limiting, security headers, and Prometheus metrics.
+"""
+
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from pydantic import BaseModel
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.middleware import SlowAPIMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import os, time, hashlib, jwt
+
+# ====== Config ======
+SECRET_KEY = os.getenv("JWT_SECRET", "dev-not-secure")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_SECONDS = 30 * 60
+
+# Demo user (replace with a real user store in production)
+DEMO_USER = {"username": "demo", "password_hash": hashlib.sha256(b"demo123!").hexdigest()}
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return hashlib.sha256(plain.encode()).hexdigest() == hashed
+
+
+def create_token(sub: str) -> str:
+    payload = {"sub": sub, "exp": int(time.time()) + ACCESS_TOKEN_EXPIRE_SECONDS}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+oauth2 = OAuth2PasswordBearer(tokenUrl="token")
+
+
+def current_user(token: str = Depends(oauth2)) -> str:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload["sub"]
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
+
+
+# ====== FastAPI App ======
+app = FastAPI(
+    title="Secure ML Sentiment Analysis API",
+    description="A secure FastAPI service for sentiment analysis using VADER. Built by thriniiiiiiiiiiii as part of a DevSecMLOps pipeline on AWS EKS.",
+    version="1.0.0",
+)
+
+# CORS (tighten origins in production)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+    allow_credentials=False,
+)
+
+
+# Security headers
+class SecureHeaders(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        resp = await call_next(request)
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["Permissions-Policy"] = "geolocation=()"
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Content-Security-Policy"] = "default-src 'self' 'unsafe-inline' data:"
+        return resp
+
+
+app.add_middleware(SecureHeaders)
+
+# Rate limiting
+limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
+# Prometheus metrics
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
+
+
+# ====== Schemas ======
+class PredictIn(BaseModel):
+    text: str
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+# ====== Endpoints ======
+
+@app.get("/healthz", tags=["Health"])
+def healthz():
+    """Health check endpoint — used by Kubernetes readiness/liveness probes."""
+    return {"status": "ok", "service": "secure-ml-sentiment-api"}
+
+
+@app.get("/", tags=["Info"])
+def root():
+    """Root endpoint — returns service information."""
+    return {
+        "service": "Secure ML Sentiment Analysis API",
+        "author": "thriniiiiiiiiiiii",
+        "github": "https://github.com/thriniiiiiiiiiiii/Secure-CI-CD-Pipeline-for-an-ML-Sentiment-Analysis-API-DevSecMLOps-",
+        "image": "thriniiiiiiiiiiii/secure-ml-sentiment-api:latest",
+        "docs": "/docs",
+        "health": "/healthz",
+    }
+
+
+@app.post("/token", response_model=TokenOut, tags=["Auth"])
+@limiter.limit("10/minute")
+def token(request: Request, form: OAuth2PasswordRequestForm = Depends()):
+    """Issue a short-lived JWT bearer token for API access."""
+    if form.username != DEMO_USER["username"] or not verify_password(
+        form.password, DEMO_USER["password_hash"]
+    ):
+        raise HTTPException(status_code=400, detail="Invalid credentials")
+    return {"access_token": create_token(form.username)}
+
+
+# ====== Sentiment Analysis (VADER) ======
+_analyzer = SentimentIntensityAnalyzer()
+
+
+def _label_from_compound(c: float) -> str:
+    """Map VADER compound score to sentiment label."""
+    if c >= 0.05:
+        return "POSITIVE"
+    if c <= -0.05:
+        return "NEGATIVE"
+    return "NEUTRAL"
+
+
+@app.post("/predict", tags=["Sentiment"])
+@limiter.limit("30/minute")
+def predict(request: Request, body: PredictIn, user: str = Depends(current_user)):
+    """
+    Analyse the sentiment of the provided text.
+
+    Returns a label (POSITIVE / NEGATIVE / NEUTRAL) and a compound score
+    from the VADER sentiment analyser.
+    """
+    scores = _analyzer.polarity_scores(body.text)
+    label = _label_from_compound(scores["compound"])
+    score = float(scores["compound"])
+    return {
+        "user": user,
+        "label": label,
+        "score": score,
+        "detail": {
+            "positive": scores["pos"],
+            "negative": scores["neg"],
+            "neutral": scores["neu"],
+        },
+    }

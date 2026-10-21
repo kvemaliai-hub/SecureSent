@@ -1,0 +1,104 @@
+name: CD – Update Argo Rollout on New Signed Image
+
+on:
+  workflow_run:
+    workflows: ["Publish & Sign Container"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: eu-west-2
+  CLUSTER_NAME: secure-ml-eks
+  NAMESPACE: secure-ml
+  ROLLOUT_NAME: secure-ml-api
+  IMAGE_REPO: ${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-sentiment-api
+  IMAGE_TAG: latest
+
+jobs:
+  rollout:
+    name: Verify Signature → Create/Update Secret → (If cluster exists) Patch Rollout
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC for EKS)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_EKS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl, helm, cosign
+        run: |
+          set -e
+          curl -sSL -o kubectl https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+          curl -sSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          COSIGN_VERSION=$(curl -s https://api.github.com/repos/sigstore/cosign/releases/latest | grep tag_name | cut -d '"' -f4)
+          curl -sL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o cosign
+          chmod +x cosign && sudo mv cosign /usr/local/bin/
+
+      - name: Determine image tag from upstream run (fallback to env.IMAGE_TAG)
+        id: tag
+        run: |
+          set -e
+          echo "value=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Cosign verify (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          IMG: ${{ env.IMAGE_REPO }}:${{ steps.tag.outputs.value }}
+        run: |
+          echo "Verifying ${IMG}"
+          cosign verify "${IMG}" --certificate-identity-regexp '.*' --certificate-oidc-issuer-regexp '.*'
+
+      - name: Probe cluster existence
+        id: probe
+        continue-on-error: true
+        run: |
+          set -e
+          if aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: No cluster detected — skipping rollout (soft pass)
+        if: ${{ steps.probe.outputs.exists == 'false' }}
+        run: |
+          echo "::notice title=Rollout Skipped::EKS cluster '${CLUSTER_NAME}' not found in ${AWS_REGION}. Skipping deployment to avoid cloud costs."
+          echo "This job is marked successful intentionally."
+
+      - name: Update kubeconfig
+        if: ${{ steps.probe.outputs.exists == 'true' }}
+        run: |
+          aws eks update-kubeconfig --region "${AWS_REGION}" --name "${CLUSTER_NAME}"
+
+      - name: Create/Update jwt-secret from GitHub Actions secret
+        if: ${{ steps.probe.outputs.exists == 'true' }}
+        env:
+          GITHUB_JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          set -e
+          if [ -z "${GITHUB_JWT_SECRET}" ]; then
+            echo "::error::Missing repository secret JWT_SECRET"
+            exit 1
+          fi
+          kubectl -n "${NAMESPACE}" delete secret jwt-secret --ignore-not-found
+          kubectl -n "${NAMESPACE}" create secret generic jwt-secret \
+            --from-literal=JWT_SECRET="${GITHUB_JWT_SECRET}"
+
+      - name: Patch Argo Rollout image
+        if: ${{ steps.probe.outputs.exists == 'true' }}
+        env:
+          IMG: ${{ env.IMAGE_REPO }}:${{ steps.tag.outputs.value }}
+        run: |
+          set -e
+          kubectl -n "${NAMESPACE}" set image rollout/${ROLLOUT_NAME} api="${IMG}"
+          kubectl -n "${NAMESPACE}" rollout status rollout/${ROLLOUT_NAME} --timeout=10m
