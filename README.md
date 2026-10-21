@@ -204,4 +204,4 @@ A detailed threat model for this project (STRIDE methodology + OWASP Top 10 alig
 - AWS authentication is handled via GitHub OIDC — no static IAM keys exist in GitHub.
 - Forked repositories cannot access AWS roles/secrets.
 - The pipeline is cost-conscious: rollout steps soft-skip if no EKS cluster is found.
-- Docker image: `thriniiiiiiiiiiii/secure-ml-sentiment-api:latest`
+  
